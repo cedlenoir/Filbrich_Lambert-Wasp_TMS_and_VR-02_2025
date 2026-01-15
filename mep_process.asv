@@ -1,0 +1,251 @@
+% 
+% 
+% decide on folder and subject level naming of the acquisitions
+% sub-00$
+% 
+% 
+% (sub-001 is test_giulia)
+% 
+% % Cédric Lenoir, NeTMeD, IoNS, UCLouvain, January 2026
+% 
+%% 1) LOAD DATA AND SET A FEW PARAMETERS
+
+% set the paths and initialize letswave
+% Select the general data folder, results folder to save HRV metrics
+data_folder = uigetdir('C:\','Select data folder');
+results_folder = fullfile(data_folder,'results');
+if ~isfolder(results_folder)
+    mkdir(results_folder);
+else
+end
+addpath(genpath(data_folder))
+
+% initialize letswave 6
+% check if lw is already on the path
+if contains(path, 'C:\Users\cedlenoir\Documents\MATLAB\letswave6-master')
+    letswave();
+    clc
+else
+    lw_path = uigetdir('C:\Users\cedlenoir\Documents\MATLAB','Select Letswave 6 folder');
+    addpath(genpath(lw_path))
+    letswave();
+    clc
+end
+
+% dialog box
+prompt = {'\fontsize{15} Subject ID? :','\fontsize{15} TMS start index? : ','\fontsize{15} TMS stop index? : ',...
+    '\fontsize{15} Sensitized arm (L/R): ','\fontsize{15} Stimulated hemisphere (L/R):',...
+    '\fontsize{15} EMG trial plots? : YES -> 1 OR NO -> 0','\fontsize{15} Comments: ',};
+dlgtitle = 'LOAD SUBJECT DATA';
+opts.Interpreter = 'tex';
+dims = repmat([1 80],7,1);
+definput = {'000','','','','','1',''};
+info = inputdlg(prompt,dlgtitle,dims,definput,opts);
+subject_id = char(info(1));
+tms_idx_start = str2double(info(2));
+tms_idx_stop = str2double(info(3));
+sensi_arm = char(info(4));
+stim_hemi = char(info(5));
+plot_opt_EMG = str2double(info(6));
+notes = char(info(7));
+
+% store info in structure
+sub_info = struct;
+sub_info.sub_ID = subject_id;
+sub_info.sensitized_arm = sensi_arm;
+sub_info.stimulated_hemisph = stim_hemi;
+sub_info.TMS_triggers = [tms_idx_start tms_idx_stop];
+sub_info.comments = notes;
+
+% folder name of Visor EMG data
+subject_folder = fullfile(data_folder,strcat('sub-',subject_id),'Sessions');
+
+% list sessions
+session_list = dir(subject_folder);
+session_folder = session_list(~ismember({session_list.name}, {'.', '..'}));
+
+% list EMG CNT files
+file_list = dir(fullfile(session_folder.folder,session_folder.name,'*emg.cnt*'));
+
+[header, data] = CLW_load(fullfile(session_folder.folder,session_folder.name,file_list.name));
+sr = 1/header.xstep;
+
+filename = file_list.name(1:end-8);
+savename = strcat('sub-',subject_id,'_',filename);
+
+% pre-processign steps in lw
+% high pass filter Butterworth 20-450 Hz; order 4
+low_cutoff = 20;
+order = 4;
+[filt_header, filt_data] = RLW_butterworth_filter(header,data,'filter_type','highpass','low_cutoff',low_cutoff,'filter_order',order);
+filt_header.name = strcat([savename,' HPfilt']);
+
+% segmentation
+xstart = -0.2;
+xduration = 0.7;
+[seg_header, seg_data] = RLW_segmentation(filt_header, filt_data, {'1'},'x_start',xstart,'x_duration',xduration);
+seg_header.name = strcat([filt_header.name,' ep']);
+seg_header.chanlocs.labels = 'EMG1';
+% keep TMS events after rMT
+seg_data = seg_data(tms_idx_start:tms_idx_stop,1,1,1,1,:);
+seg_header.datasize = [tms_idx_stop-tms_idx_start+1,1,1,1,1,round(xduration*sr)];
+
+% save lw dataset
+CLW_save(fullfile(session_folder.folder,session_folder.name),seg_header, seg_data);
+
+% define baseline window to check for baseline activity
+bsln_time_window = [-0.2 0];
+bsln_sample_window = [1 round(0.2*sr+1)];
+
+% exclude MEP + warning if baseline noise RMS > +/- 3*SD, until no outliers
+mep_data = squeeze(seg_data);
+idx = 1;
+for itrial = 1:tms_idx_stop-tms_idx_start+1
+    bsln_rms(itrial,1) = rms(mep_data(itrial,bsln_sample_window(1):bsln_sample_window(2)));
+    dev_std(itrial,1) = std(mep_data(itrial,bsln_sample_window(1):bsln_sample_window(2)));
+    if bsln_rms(itrial,1) > dev_std(itrial,1)*3
+        idx_exclud(idx,1) = itrial;
+        idx = idx+1;
+    else
+    end
+end
+% exclude MEP + warning if baseline noise max amplitude > 15 µV
+
+
+% plot MEP and criteria
+f = figure('Color','w','Position',[500 500 800 800]);
+xline(0,'TMS')
+
+
+% define response time window for EMG, from trigger index to +200 ms
+% responseEMGWind = [trigger_idx trigger_idx+0.04*sr];
+
+% define MEP peak-to-peak amplitude criterion > 50 µV
+emg_threshold = 50;
+
+
+
+% squeeeze data and send it in workspace
+
+
+%% 2) PREPROCESS EMG DATA
+
+avg_emg_bl = zeros(trials,1);
+
+for itrial = 1:trials
+    for ichan = 1:2
+        % baseline correction
+        data.emg_filt(:,ichan,itrial) = data.emg_filt(:,ichan,itrial) - mean(data.emg_filt(1:baselineWind*sr,ichan,itrial));
+
+        %%%%%%%%%%% check if there is backgroun noise / pre-stimulus muscular activity ?
+
+        avg_emg_bl(ichan,itrial) = mean(data.emg_filt(1:baselineWind*sr,ichan,itrial));
+
+        % find max and min peaks in the response time window, and 10 ms after TMS pulse to avoid artefact and get its latency
+        [data.peak_max_amp_emg(itrial,ichan), data.peak_max_time_emg(itrial,ichan)] = max(squeeze(data.emg_filt((responseEMGWind(1)+(0.01*sr)):responseEMGWind(2),ichan,itrial)));
+        [data.peak_min_amp_emg(itrial,ichan), data.peak_min_time_emg(itrial,ichan)] = min(squeeze(data.emg_filt((responseEMGWind(1)+(0.01*sr)):responseEMGWind(2),ichan,itrial)));
+        data.peak_max_time_emg(itrial,ichan) = data.peak_max_time_emg(itrial,ichan) + responseEMGWind(1)+(0.01*sr)-1;
+        data.peak_min_time_emg(itrial,ichan) = data.peak_min_time_emg(itrial,ichan) + responseEMGWind(1)+(0.01*sr)-1;
+
+        data.p2p_amp_emg(itrial,ichan) = abs(data.peak_max_amp_emg(itrial,ichan)) + abs(data.peak_min_amp_emg(itrial,ichan));
+
+        % check the duration between min and max, and warning if greater
+        % than 15 ms
+        data.p2p_time_intv(itrial,ichan) = abs(data.peak_max_time_emg(itrial,ichan) - data.peak_min_time_emg(itrial,ichan));
+        if data.p2p_time_intv(itrial,ichan) > 0.015*sr
+            data.p2p_amp_emg(itrial,ichan) = NaN;
+            data.MEP_latency(itrial,ichan) = NaN;
+        else
+        end
+
+        % check if latency of MEPs is valid (< 40 ms)
+        if ~isnan(data.p2p_amp_emg(itrial,ichan))
+
+            if data.peak_max_time_emg(itrial,ichan) < responseEMGWind(2) && data.peak_max_time_emg(itrial,ichan) < data.peak_min_time_emg(itrial,ichan)
+                data.p2p_amp_emg(itrial,ichan) = data.p2p_amp_emg(itrial,ichan);
+                data.MEP_latency(itrial,ichan) = data.peak_max_time_emg(itrial,ichan);
+            elseif data.peak_min_time_emg(itrial,ichan) < responseEMGWind(2) && data.peak_min_time_emg(itrial,ichan) < data.peak_max_time_emg(itrial,ichan)
+                data.p2p_amp_emg(itrial,ichan) = data.p2p_amp_emg(itrial,ichan);
+                data.MEP_latency(itrial,ichan) = data.peak_min_time_emg(itrial,ichan);
+            else
+                data.p2p_amp_emg(itrial,ichan) = NaN;
+                data.MEP_latency(itrial,ichan) = NaN;
+            end
+
+        elseif isnan(data.p2p_amp_emg(itrial,ichan))
+            data.MEP_latency(itrial,ichan) = NaN;
+        end
+
+        % check if the MEP p2p amplitude are > than threshold
+        if ~isnan(data.p2p_amp_emg(itrial,ichan)) && data.p2p_amp_emg(itrial,ichan) > emg_threshold
+            data.p2p_amp_emg(itrial,ichan) = data.p2p_amp_emg(itrial,ichan);
+        else
+            data.p2p_amp_emg(itrial,ichan) = NaN;
+            data.MEP_latency(itrial,ichan) = NaN;
+        end
+
+    end
+end
+
+% list the indices of valid MEPs among all trials
+for ichan= 1:2
+    for itrial = 1:trials
+        idxMEP(itrial,ichan) = ~isnan(data.p2p_amp_emg(itrial,ichan));
+    end
+    valid_MEP_trials{:,ichan} = find(idxMEP(:,ichan));
+end
+
+%% Plot EMG and peaks
+
+if plot_opt_EMG == 1
+    % remove trials with no MEP
+
+    for ichan = 1:2
+        for itrial = 1:length(valid_MEP_trials{1,ichan})
+
+            figure('Position',[600,0,600,500],'Color','w');
+            %     subplot(2,1,1)
+            pe1 = plot(data.emg_filt(:,ichan,valid_MEP_trials{1,ichan}(itrial)),'b');
+            title(strcat('EMG-',file_list(chosen_file).name(1:end-4),'-chan-"',data.chaninfo(1).title,'"-trial#',num2str(valid_MEP_trials{1,ichan}(itrial))))
+            hold on
+            pe2 = plot(data.peak_max_time_emg(valid_MEP_trials{1,ichan}(itrial),ichan),data.peak_max_amp_emg(valid_MEP_trials{1,ichan}(itrial),ichan),'xr','MarkerSize',20);
+            pe3 = plot(data.peak_min_time_emg(valid_MEP_trials{1,ichan}(itrial),ichan),data.peak_min_amp_emg(valid_MEP_trials{1,ichan}(itrial),ichan),'xr','MarkerSize',20);
+            ax= gca;
+            ax.Box = 'off';
+            ax.XLabel.String = 'time(ms)';
+            ax.YLabel.String = strcat('amplitude (mV)');
+            ax.XTickLabel = {'-500','-400','-300','-200','-100','0','100','200','300','400','500'};
+            xline(responseEMGWind(2),'k--','response window','LabelHorizontalAlignment','right')
+            xline(trigger_idx,'r--','TMS','LabelHorizontalAlignment','left')
+            legend(pe3,'peak-to-peak','box','off')
+        end
+    end
+
+    pause(1)
+    disp('To continue and close all figures press any key !')
+    pause()
+    close all; clc
+
+else
+end
+
+
+%% plot all EMG traces
+for ichan = 1:2
+    for itrial = 1:trials
+        figure('Position',[0,0,600,500],'Color','w');
+        pe4 = plot(data.emg_filt(:,ichan,itrial),'r');
+        title(strcat('EMG-',file_list(choose_file).name(6:end-4),'-chan#',num2str(ichan),'-',data.chaninfo(2).title,'-trial#',num2str(itrial)))
+        hold on
+        pe5 = plot(data.peak_max_time_emg(itrial,ichan),data.peak_max_amp_emg(itrial,ichan),'xr','MarkerSize',20);
+        pe6 = plot(data.peak_min_time_emg(itrial,ichan),data.peak_min_amp_emg(itrial,ichan),'xr','MarkerSize',20);
+        ax= gca;
+        ax.Box = 'off';
+        ax.XLabel.String = 'time(ms)';
+        ax.YLabel.String = strcat('amplitude (mV)');
+        xline(responseEMGWind(1),'k--')
+        xline(responseEMGWind(2),'k--')
+        xline(trigger_idx,'r-','TMS','LabelHorizontalAlignment','left')
+        legend(pe4,'ALL','box','off')
+    end
+end
