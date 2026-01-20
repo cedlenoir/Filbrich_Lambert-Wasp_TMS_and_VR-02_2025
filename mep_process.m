@@ -14,13 +14,8 @@
 % Select the general data folder which contains all subjects folders
 data_folder = uigetdir('C:\','Select data folder');
 results_folder = fullfile(data_folder,'results');
-pre_proc_folder = fullfile(data_folder,'pre-processed');
 if ~isfolder(results_folder)
     mkdir(results_folder);
-else
-end
-if ~isfolder(pre_proc_folder)
-    mkdir(pre_proc_folder);
 else
 end
 addpath(genpath(data_folder))
@@ -71,7 +66,11 @@ sub_info.comments = notes;
 
 % folder name of Visor EMG data
 subject_folder = fullfile(data_folder,strcat('sub-',subject_id),'Sessions');
-
+pre_proc_folder = fullfile(data_folder,'pre-processed',sprintf('sub-%s',subject_id));
+if ~isfolder(pre_proc_folder)
+    mkdir(pre_proc_folder);
+else
+end
 % list sessions
 session_list = dir(subject_folder);
 session_folder = session_list(~ismember({session_list.name}, {'.', '..'}));
@@ -90,6 +89,9 @@ clear out_data
 sr = 1/header.xstep;
 
 % pre-processign steps in lw
+% DC removal
+
+
 % high pass filter Butterworth 4 Hz; order 4
 low_cutoff = 4;
 order = 4;
@@ -102,30 +104,54 @@ xduration = 0.7;
 [seg_header, seg_data] = RLW_segmentation(filt_header, filt_data, {'1'},'x_start',xstart,'x_duration',xduration);
 seg_header.name = strcat([filt_header.name,' ep']);
 seg_header.chanlocs.labels = 'EMG1';
-% keep TMS events after rMT
-seg_data = seg_data(tms_idx_start:tms_idx_stop,1,1,1,1,:);
-seg_header.datasize = [tms_idx_stop-tms_idx_start+1,1,1,1,1,round(xduration*sr)];
 
+% Linear detrend
+
+
+% keep TMS events after rMT
+% build valid epochs vector
+valid_tms_idx = (ixd_tms_pre_start:ixd_tms_pre_stop);
+for iblock_pst = 1:4
+    valid_tms_idx = [valid_tms_idx ixd_tms_pst_start(iblock_pst):ixd_tms_pst_stop(iblock_pst)];
+end
+seg_data = seg_data(valid_tms_idx,1,1,1,1,:);
+
+seg_header.datasize = size(seg_data);
+seg_header.events = seg_header.events(valid_tms_idx);
 % save lw dataset
-CLW_save(fullfile(session_folder.folder,session_folder.name),seg_header, seg_data);
+CLW_save(pre_proc_folder,seg_header, seg_data);
 
 % define baseline window to check for baseline activity
 bsln_time_window = [-0.2 0];
 bsln_sample_window = [1 round(0.2*sr+1)];
 
-% exclude MEP + warning if baseline noise RMS > +/- 3*SD, until no outliers
+% check for baseline EMG activity
 mep_data = squeeze(seg_data);
+
+% compute RMS for each trial
+for itrial = 1:size(mep_data,1)
+    bsln_rms(itrial,1) = rms(mep_data(itrial,bsln_sample_window(1):bsln_sample_window(2)));
+end
+% threshold mean RMS +/- 3*SD (permissive)
+avg_bsln_rms = mean(bsln_rms,1);
+sd_bsln_rms = std(bsln_rms,1);
+thrshd = avg_bsln_rms+3*sd_bsln_rms;
+% loop until no outlier is found (exclude MEP + warning if baseline trial
+% RMS > mean RMS +/- 3*SD, until no outliers)
 idx = 1;
 idx_exclud = [];
-for itrial = 1:tms_idx_stop-tms_idx_start+1
-    bsln_rms(itrial,1) = rms(mep_data(itrial,bsln_sample_window(1):bsln_sample_window(2)));
-    bsln_std(itrial,1) = std(mep_data(itrial,bsln_sample_window(1):bsln_sample_window(2)));
-    if bsln_rms(itrial,1) > dev_std(itrial,1)*3
-        idx_exclud(idx,1) = itrial;
+for itrial = 1:size(mep_data,1)
+    if bsln_rms(itrial,1) < avg_bsln_rms + (3*sd_bsln_rms)
+        temp_mep_data(idx,:) = mep_data(itrial,:);
         idx = idx+1;
     else
+        idx = idx;
+        idx_exclud = [idx_exclud itrial];
     end
 end
+
+
+for itrial = 1:size(mep_data,1)
 if isempty(idx_exclud)
     disp(strcat([num2str(0),' MEPs excluded']))
 else
@@ -134,9 +160,23 @@ end
 % exclude MEP + warning if baseline noise max amplitude > 15 µV
 
 % plot MEP and criteria
-f = figure('Color','w','Position',[500 500 800 800]);
-xline(0,'TMS')
-
+xval = -0.2:1/sr:0.5;
+for itrial = 1:size(mep_data,1)
+    f = figure('Color','w','Position',[500 500 1500 700]);
+    plot(xval,mep_data(itrial,:),'k','LineWidth',1)
+    xline(0,'--r','TMS','LabelOrientation','horizontal')
+    yline(0,'-k')
+    yline(bsln_rms(itrial,1),'--k','RMS','LabelOrientation','horizontal','LabelVerticalAlignment','top','LabelHorizontalAlignment','left')
+    yline(thrshd,'--g','threshold','LabelOrientation','horizontal','LabelVerticalAlignment','top')
+    ax = gca;
+    ax.TickDir = 'out';
+    ax.XLabel.String = 'time (s)';
+    ax.YLabel.String = 'amplitude (µV)';
+    ax.Box = 'off';
+    title(strcat(['sub-',subject_id,' MEP#',num2str(itrial)]))
+    pause()
+    
+end
 
 % define response time window for EMG, from trigger index to +200 ms
 % responseEMGWind = [trigger_idx trigger_idx+0.04*sr];
