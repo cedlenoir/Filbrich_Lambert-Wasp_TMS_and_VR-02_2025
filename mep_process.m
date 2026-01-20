@@ -241,10 +241,8 @@ for iblock = 1:5
 end
 
 % define MEP peak-to-peak amplitude criterion > 50 µV in specific window
-% extract MEP latencies
-
 emg_threshold = 50;
-
+% extract MEP latencies
 
 
 
