@@ -5,6 +5,9 @@
 % main_folder contains the raw_data folder, pre-processed data folder,
 % results folder, (scripts folder?)
 % 
+% Block 1 (BLK1) is the block pre-HFS
+% Block 2 to 5 (BLK2 to BLK5) are the blocks post-HFS
+% 
 % (sub-001 is test_giulia)
 % (sub-002 is Laurie)
 %
@@ -93,23 +96,23 @@ clear out_data
 sr = 1/header.xstep;
 
 % pre-processign steps in lw
+% DC removal
+[dc_header, dc_data] = RLW_dc_removal(header,data,'linear_detrend',0);
+
 % high pass filter Butterworth 4 Hz; order 4
 low_cutoff = 4;
 order = 4;
-[filt_header, filt_data] = RLW_butterworth_filter(header,data,'filter_type','highpass','low_cutoff',low_cutoff,'filter_order',order);
+[filt_header, filt_data] = RLW_butterworth_filter(dc_header,dc_data,'filter_type','highpass','low_cutoff',low_cutoff,'filter_order',order);
 
 % segmentation
 xstart = -0.2;
 xduration = 0.7;
 [seg_header, seg_data] = RLW_segmentation(filt_header, filt_data, {'1'},'x_start',xstart,'x_duration',xduration);
 seg_header.chanlocs.labels = 'EMG1';
-
-% DC & Linear detrend
-[dc_header, dc_data] = RLW_dc_removal(seg_header,seg_data,'linear_detrend',1);
-dc_header.name = strcat(header.name,' HPfilt ep DC');
+seg_header.name = strcat(header.name,' DC HPfilt ep');
 
 % save dataset
-CLW_save(sub_pre_proc_folder,dc_header, dc_data);
+CLW_save(sub_pre_proc_folder,seg_header, seg_data);
 
 % keep TMS events after rMT
 % arrange epochs of valid TMS triggers for each TMS block
@@ -122,10 +125,14 @@ for iblock = 1:5
     end
 end
 for iblock = 1:5
-    [block_header{iblock,1}, block_data{iblock,1}] = RLW_arrange_epochs(dc_header, dc_data,valid_tms_idx{iblock,1});
-    block_header{iblock,1}.name = strcat(dc_header.name,' BLK ',num2str(iblock));
+    [block_header{iblock,1}, block_data{iblock,1}] = RLW_arrange_epochs(seg_header, seg_data,valid_tms_idx{iblock,1});
+    block_header{iblock,1}.name = strcat(seg_header.name,' BLK ',num2str(iblock));
     CLW_save(sub_pre_proc_folder,block_header{iblock,1}, block_data{iblock,1});
 end
+
+%%%%%%%%%%%%
+% name the MEPs according to trial condition per block !!
+%%%%%%%%%%%%
 
 % define baseline window to check for baseline activity
 bsln_time_window = [-0.2 0];
@@ -134,100 +141,107 @@ bsln_sample_window = [1 round(0.2*sr+1)];
 % First check: for baseline single trial EMG activity (RMS) per block
 % threshold is mean(RMS) + 2.5*std(RMS)
 % (as in Sulcova D. et al. bioRxiv 2022; Grandjean and Duque NIMG 2020)
-idx_exclud = cell(5,1);
+
+% loop until no outliers is identified
 for iblock = 1:5
-    temp_data = squeeze(block_data{iblock,1});
 
-    % compute RMS for each trial
-    for itrial = 1:size(temp_data,1)
-        bsln_rms{iblock,1}(itrial,1) = rms(temp_data(itrial,bsln_sample_window(1):bsln_sample_window(2)));
-    end
-    % threshold mean RMS +/- 3*SD (permissive)
-    avg_bsln_rms(iblock,1) = mean(bsln_rms{iblock,1});
-    sd_bsln_rms(iblock,1) = std(bsln_rms{iblock,1});
-    thrshld(iblock,1) = avg_bsln_rms(iblock,1)+2.5*sd_bsln_rms(iblock,1);
-    % loop until no outlier is found (exclude MEP + warning if baseline trial
-    % RMS > mean RMS +/- 2.5*SD, until no outliers)
-    idx_val = 1;
-    idx_exc = 1;
-    for itrial = 1:size(temp_data,1)
-        if bsln_rms{iblock,1}(itrial,1) < thrshld(iblock,1)
-            valid_data{iblock,1}(idx_val,:) = temp_data(itrial,:);
-            idx_val = idx_val+1;
-        else
-            idx_exclud{iblock,1}(idx_exc,1) = itrial;
-            idx_exc = idx_exc+1;
-        end
-    end
-    % if at least one MEP has been excluded redo the RMS check
-    if size(valid_data{iblock,1},1) < block_header{iblock,1}.datasize(1)
+    run_loop = 1;
+    iloop = 1;
+    temp_data{iblock,iloop} = squeeze(block_data{iblock,1});
 
-        for itrial = 1:size(valid_data{iblock,1},1)
-            bsln_rms2{iblock,1}(itrial,1) = rms(valid_data{iblock,1}(itrial,bsln_sample_window(1):bsln_sample_window(2)));
+    while run_loop
+
+           % compute RMS for each trial
+        for itrial = 1:size(temp_data{iblock,iloop},1)
+            bsln_rms{iblock,1}(itrial,1) = rms(temp_data{iblock,iloop}(itrial,bsln_sample_window(1):bsln_sample_window(2)));
         end
-    % threshold mean RMS +/- 3*SD (permissive)
-    avg_bsln_rms2(iblock,1) = mean(bsln_rms2{iblock,1});
-    sd_bsln_rms2(iblock,1) = std(bsln_rms2{iblock,1});
-    thrshld2(iblock,1) = avg_bsln_rms2(iblock,1)+2.5*sd_bsln_rms2(iblock,1);
-    % loop until no outlier is found (exclude MEP + warning if baseline trial
-    % RMS > mean RMS +/- 3*SD, until no outliers)
-    idx_val = 1;
-    idx_exc = 1;
-    for itrial = 1:size(valid_data{iblock,1},1)
-        if bsln_rms2{iblock,1}(itrial,1) < thrshld2(iblock,1)
-            valid_data{iblock,1}(idx_val,:) = valid_data{iblock,1}(itrial,:);
-            idx_val = idx_val+1;
+
+        % threshold mean RMS +/- 2.5*SD (permissive)
+        avg_bsln_rms(iblock,iloop) = mean(bsln_rms{iblock,1});
+        sd_bsln_rms(iblock,iloop) = std(bsln_rms{iblock,1});
+        thrshld(iblock,iloop) = avg_bsln_rms(iblock,iloop)+2.5*sd_bsln_rms(iblock,iloop);
+
+        idx_val = 1;
+        idx_exc = 1;
+        idx_exclud{iblock,iloop} = [];
+        for itrial = 1:size(temp_data{iblock,iloop},1)
+            if bsln_rms{iblock,1}(itrial,1) < thrshld(iblock,iloop)
+                valid_data{iblock,1}(idx_val,:) = temp_data{iblock,iloop}(itrial,:);
+                idx_val = idx_val+1;
+            else
+                idx_exclud{iblock,iloop}(idx_exc,1) = itrial;
+                idx_exc = idx_exc+1;
+            end
+        end
+        if isempty(idx_exclud{iblock,iloop})
+            run_loop = 0;
+            disp(strcat(['Loop stop after ',num2str(iloop),' iteration(s): ',num2str(length(idx_exclud{iblock,iloop})),' MEP discarded']))
         else
-            idx_exclud{iblock,1}(idx_exc,1) = itrial;
-            idx_exc = idx_exc+1;
+            iloop = iloop+1;
+            temp_data{iblock,iloop} = valid_data{iblock,1};
+            valid_data{iblock,1} = [];
+            bsln_rms{iblock,1} = [];
+            idx_exclud{iblock,iloop} = [];
+            disp(strcat(['---> iteration ',num2str(iloop),' --->']))
         end
     end
-    else
-    end
-    clear temp_data
 end
 
-% display the number of MEP excluded for each block
+% Warning: display the number of MEP excluded for each block and loop
 clc
-for iblock = 1:5
-    if isempty(idx_exclud{iblock,1})
-    disp(strcat(['No MEPs exclude in block ',num2str(iblock)]))
-    else
-        disp(strcat([num2str(length(idx_exclud{iblock,1})),' MEPs excluded in block ',num2str(iblock)]))
+disp('Results of first check:')
+disp(' ')
+for iblock = 1:size(idx_exclud,1)
+    for iloop = 1:size(idx_exclud,2)
+        if isempty(idx_exclud{iblock,iloop})
+            disp(strcat(['No MEPs exclude in block ',num2str(iblock),' at loop ',num2str(iloop)]))
+            break
+        else
+            disp(strcat([num2str(length(idx_exclud{iblock,iloop})),' MEPs excluded in block ',num2str(iblock),' at loop ',num2str(iloop)]))
+        end
     end
 end
 
 % Second check: threshold on baseline RMS exceeding +/-15 µV
 % (as in Sulcova et al. BioRxiv 2022; Morozova et al. Sci Reports 2024)
 abs_thrshld = 15;
-idx_exclud = cell(5,1);
+idx_exclud{1,size(idx_exclud,2)+1} = [];
+
 for iblock = 1:5
-    for itrial = 1:size(valid_data{iblock,1},1)
-        bsln_rms2{iblock,1}(itrial,1) = rms(valid_data{iblock,1}(itrial,bsln_sample_window(1):bsln_sample_window(2)));
-    end
 
     idx_val = 1;
     idx_exc = 1;
     for itrial = 1:size(valid_data{iblock,1},1)
-        if bsln_rms2{iblock,1}(itrial,1) < abs_thrshld
-            valid_data2{iblock,1}(idx_val,:) = valid_data{iblock,1}(itrial,:);
+        if bsln_rms{iblock,1}(itrial,1) < abs_thrshld
+            valid_data{iblock,2}(idx_val,:) = valid_data{iblock,1}(itrial,:);
             idx_val = idx_val+1;
         else
-            idx_exclud{iblock,1}(idx_exc,1) = itrial;
+            idx_exclud{iblock,end}(idx_exc,1) = itrial;
             idx_exc = idx_exc+1;
         end
     end
 end
+% Warning: display the number of MEP excluded for each block
+clc
+disp('Results of second check:')
+disp(' ')
+for iblock = 1:size(idx_exclud,1)
+    if isempty(idx_exclud{iblock,end})
+        disp(strcat(['No MEPs exclude in block ',num2str(iblock)]))
+    else
+        disp(strcat([num2str(length(idx_exclud{iblock,end})),' MEPs excluded in block ',num2str(iblock)]))
+    end
+end
+
 % plot MEP and criteria
 xval = -0.2:1/sr:0.5;
 for iblock = 1:5
-    for itrial = 1:size(idx_exclud{iblock,1},1)
+    for itrial = 1:size(idx_exclud{iblock,end},1)
         f = figure('Color','w','Position',[0 0 1500 700]);
-        plot(xval,valid_data{iblock,1}(idx_exclud{iblock,1}(itrial,1),:),'k','LineWidth',1)
+        plot(xval,valid_data{iblock,1}(idx_exclud{iblock,end}(itrial,1),:),'k','LineWidth',1)
         xline(0,'--r','TMS','LabelOrientation','horizontal')
         yline(0,'-k')
-        yline(bsln_rms2{iblock,1}(idx_exclud{iblock,1}(itrial,1),1),'--k','RMS','LabelOrientation','horizontal','LabelVerticalAlignment','top','LabelHorizontalAlignment','left')
-        yline(thrshld(iblock,1),'--g','threshold','LabelOrientation','horizontal','LabelVerticalAlignment','top','LabelHorizontalAlignment','center')
+        yline(bsln_rms{iblock,1}(idx_exclud{iblock,end}(itrial,1),1),'--k','RMS','LabelOrientation','horizontal','LabelVerticalAlignment','top','LabelHorizontalAlignment','left')
         yline(abs_thrshld,'--m','absolute threshold','LabelOrientation','horizontal','LabelVerticalAlignment','top','LabelHorizontalAlignment','right')
         ax = gca;
         ax.TickDir = 'out';
@@ -235,13 +249,56 @@ for iblock = 1:5
         ax.YLabel.String = 'amplitude (µV)';
         ax.YLim = [-200 200];
         ax.Box = 'off';
-        title(strcat(['sub-',subject_id,' MEP#',num2str(idx_exclud{iblock,1}(itrial,1)),' in block ',num2str(iblock)]))
+        title(strcat(['sub-',subject_id,' MEP#',num2str(idx_exclud{iblock,end}(itrial,1)),' in block ',num2str(iblock)]))
         pause()
     end
 end
 
-% define MEP peak-to-peak amplitude criterion > 50 µV in specific window
-emg_threshold = 50;
+% save the valid MEPs for each block
+for iblock = 1:size(valid_data,1)
+    clean_header{iblock,1} = block_header{iblock,1};
+    clean_header{iblock,1}.name = strcat([clean_header{iblock,1}.name,' clean']);
+    clean_header{iblock,1}.events = [];
+    clean_data{iblock,1}(:,1,1,1,1,:) = valid_data{iblock,2};
+    clean_header{iblock,1}.datasize = size(clean_data{iblock,1});
+    CLW_save(sub_pre_proc_folder,clean_header{iblock,1},clean_data{iblock,1});
+end
+
+% define MEP peak-to-peak amplitude criterion > 50 µV in specific window (s)
+mep_threshold = 50;
+response_window = round([0.205*sr+1 0.265*sr+1]);
+for iblock = 1:size(valid_data,1)
+    idx_bad = 1;
+    bad_mep{iblock,idx_bad} = [];
+    for itrial = 1:size(valid_data{iblock,2},1)
+        [max_p{iblock,itrial}, max_lat{iblock,itrial}] = max(valid_data{iblock,2}(itrial,response_window(1):response_window(2)));
+        [min_p{iblock,itrial}, min_lat{iblock,itrial}] = min(valid_data{iblock,2}(itrial,response_window(1):response_window(2)));
+
+        % check if time between positive and negative maxima is ok OR if MEP amplitude >= 50 µV
+        if abs(max_lat{iblock,itrial} - min_lat{iblock,itrial}) > round(0.015*sr,1) || (max_p{iblock,itrial} + abs(min_p{iblock,itrial})) < mep_threshold
+            bad_mep{iblock,1}(idx_bad,1) = itrial;
+            idx_bad = idx_bad+1;
+        else
+        end
+    end
+end
+
+% store MEPs amplitude
+for iblock = 1:size(valid_data,1)
+    for itrial = 1:size(valid_data{iblock,2},1)
+        if isempty(bad_mep{iblock,1})
+            mep_amp{iblock,1}(itrial,1) = (max_p{iblock,itrial} + abs(min_p{iblock,itrial}));
+            if max_lat{iblock,itrial} < min_lat{iblock,itrial}
+                mep_lat{iblock,1}(itrial,1) = max_lat{iblock,itrial};
+            else
+                mep_lat{iblock,1}(itrial,1) = min_lat{iblock,itrial};
+            end
+        elseif ~isempty(bad_mep{iblock,1})
+            
+
+    end
+end
+
 % extract MEP latencies
 
 
